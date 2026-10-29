@@ -5,6 +5,8 @@ const port=Number(process.env.PORT||3010);
 const sessions=new Map();
 const authTokens=new Map(), attempts=new Map();
 const originAllowed='https://aifrontend-topaz.vercel.app';
+const allowedOrigins=new Set([originAllowed,...(process.env.EXTRA_CORS_ORIGINS||'').split(',').map(x=>x.trim()).filter(Boolean)]);
+function allowedOrigin(origin){if(!origin)return false;try{const u=new URL(origin);return u.protocol==='https:'&&(allowedOrigins.has(origin)||(/^aifrontend-[a-z0-9-]+\.vercel\.app$/i.test(u.hostname)&&u.origin===origin))}catch{return false}}
 const password=process.env.CALL_CENTER_ACCESS_PASSWORD||'';
 const maxSessionNpr=Number(process.env.MAX_SESSION_NPR||10);
 const LOG_PREFIX='[voice]';
@@ -28,8 +30,8 @@ const page=await readFile(new URL('./index.html',import.meta.url));
 export async function handler(req,res){try{
 const url=new URL(req.url,'http://localhost');
 const origin=req.headers.origin;
-if(origin&&origin!==originAllowed){console.warn(LOG_PREFIX,'blocked origin',origin,req.url);return reply(res,403,{error:'Origin not allowed'})}
-if(origin===originAllowed){res.setHeader('access-control-allow-origin',originAllowed);res.setHeader('vary','Origin');res.setHeader('access-control-allow-headers','authorization, content-type');res.setHeader('access-control-allow-methods','GET, POST, OPTIONS')}
+if(origin&&!allowedOrigin(origin)){console.warn(LOG_PREFIX,'blocked origin',origin,req.url);return reply(res,403,{error:'Origin not allowed'})}
+if(origin&&allowedOrigin(origin)){res.setHeader('access-control-allow-origin',origin);res.setHeader('vary','Origin');res.setHeader('access-control-allow-headers','authorization, content-type');res.setHeader('access-control-allow-methods','GET, POST, OPTIONS')}
 if(req.method==='OPTIONS')return res.writeHead(204).end();
 if(url.pathname==='/api/login'&&req.method==='POST'){
  if(!password||password.length<16)return reply(res,503,{error:'Set CALL_CENTER_ACCESS_PASSWORD (16+ characters) on VPS'});
