@@ -70,7 +70,7 @@ s.npr+=estimatedTts;
 return reply(res,200,{heard:text,reply:answer,audio,usage:usage(s),note:'Cost is estimated from configured rates; verify against provider invoice.'});
 } finally {busy.delete(b.id)}
 }
-if(req.method==='POST'&&url.pathname==='/api/end'){const b=await body(req),s=session(b.id);sessions.delete(b.id);return reply(res,200,{usage:usage(s)})}
+if(req.method==='POST'&&url.pathname==='/api/end'){const b=await body(req),s=session(b.id,req.callToken);sessions.delete(b.id);return reply(res,200,{usage:usage(s)})}
 reply(res,404,{error:'Not found'});
 }catch(e){reply(res,400,{error:String(e.message||e)})}
 }
