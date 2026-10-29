@@ -16,7 +16,7 @@ function session(id){const s=sessions.get(id);if(!s)throw Error('Invalid session
 async function openai(path,opts){const key=process.env.OPENAI_API_KEY;if(!key)throw Error('OPENAI_API_KEY not configured');const r=await fetch('https://api.openai.com/v1/'+path,{...opts,headers:{authorization:'Bearer '+key,...opts.headers}});if(!r.ok)throw Error('OpenAI '+r.status+': '+(await r.text()).slice(0,250));return r}
 const system='You are a polite Nepali RoomKhoj phone assistant. Speak in short, clear Nepali or the caller language. Ask one question at a time. Never invent room availability, pricing, or contact details. Keep replies under 35 words.';
 const page=await readFile(new URL('./index.html',import.meta.url));
-http.createServer(async(req,res)=>{try{
+export async function handler(req,res){try{
 const url=new URL(req.url,'http://localhost');
 if(req.method==='GET'&&url.pathname==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(page)}
 if(req.method==='GET'&&url.pathname==='/api/health')return reply(res,200,{ok:true,apiKeyConfigured:Boolean(process.env.OPENAI_API_KEY),targetNprPerMinute:target});
@@ -49,4 +49,5 @@ return reply(res,200,{heard:text,reply:answer,audio,usage:usage(s),note:'Cost is
 if(req.method==='POST'&&url.pathname==='/api/end'){const b=await body(req),s=session(b.id);sessions.delete(b.id);return reply(res,200,{usage:usage(s)})}
 reply(res,404,{error:'Not found'});
 }catch(e){reply(res,400,{error:String(e.message||e)})}
-}).listen(port,()=>console.log('AI Call Center listening on http://localhost:'+port));
+}
+if(!process.env.VERCEL)http.createServer(handler).listen(port,()=>console.log('AI Call Center listening on http://localhost:'+port));
