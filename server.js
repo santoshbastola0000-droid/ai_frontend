@@ -6,7 +6,7 @@ const sessions=new Map();
 const authTokens=new Map(), attempts=new Map();
 const originAllowed='https://aifrontend-topaz.vercel.app';
 const allowedOrigins=new Set([originAllowed,...(process.env.EXTRA_CORS_ORIGINS||'').split(',').map(x=>x.trim()).filter(Boolean)]);
-function allowedOrigin(origin){if(!origin)return false;try{const u=new URL(origin);return u.protocol==='https:'&&(allowedOrigins.has(origin)||(/^aifrontend-[a-z0-9-]+\.vercel\.app$/i.test(u.hostname)&&u.origin===origin))}catch{return false}}
+function allowedOrigin(origin){if(!origin)return false;try{const u=new URL(origin);return u.protocol==='https:'&&u.origin===origin&&allowedOrigins.has(origin)}catch{return false}}
 const password=process.env.CALL_CENTER_ACCESS_PASSWORD||'';
 const maxSessionNpr=Number(process.env.MAX_SESSION_NPR||10);
 const LOG_PREFIX='[voice]';
@@ -54,7 +54,6 @@ if(busy.has(b.id))return reply(res,409,{error:'Previous voice turn is still proc
 busy.add(b.id);s.turns++;
 try {
 if(!Array.isArray(b.audio)||b.audio.length===0||b.audio.length>3_000_000||b.audio.some(x=>!Number.isInteger(x)||x<0||x>255))return reply(res,400,{error:'Invalid audio'});
-const elapsedMin=Math.max((Date.now()-s.started)/60000,1);
 if(s.npr>=maxSessionNpr)return reply(res,429,{error:'Session spending limit reached',usage:usage(s)});
 const allowedTypes={'audio/webm':['audio/webm','caller.webm'],'audio/mp4':['audio/mp4','caller.mp4'],'audio/ogg':['audio/ogg','caller.ogg']};
 const audioType=String(b.audioType||'audio/webm').split(';')[0].trim().toLowerCase();
