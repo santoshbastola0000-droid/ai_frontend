@@ -1,28 +1,92 @@
 <!doctype html><html lang="ne"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RoomKhoj AI Call Center</title><style>body{margin:0;background:#0b1220;color:#f4f7ff;font:16px system-ui}.wrap{max-width:650px;margin:7vh auto;padding:25px}.card{background:#172236;border:1px solid #31405b;border-radius:20px;padding:26px}h1{margin-top:0}button{border:0;border-radius:12px;padding:13px 19px;font-weight:700;cursor:pointer;margin:6px}button:disabled{opacity:.4;cursor:not-allowed}.start{background:#44dd9b}.talk{background:#8dbaff}.stop{background:#ff9b9b}.pill{background:#253751;padding:10px;border-radius:10px}#log{white-space:pre-wrap;min-height:110px;line-height:1.65}small{color:#b7c4d9}</style></head><body><div class="wrap"><div class="card"><h1>🎙️ RoomKhoj AI Call Center</h1><p>नेपाली / English voice test · AI API target रु. 3/min (SIP अलग)</p><div id="loginPanel"><h2>🔐 Login to AI Call Center</h2><input id="password" type="password" autocomplete="off" placeholder="Call Center access password" aria-label="Access password" style="padding:12px;border-radius:9px;max-width:90%"><br><button class="start" id="loginBtn">Login</button></div><div id="callPanel" hidden><button class="start" id="start">Start Test Call</button><button class="talk" id="talk" disabled>🎤 Hold to Speak (manual)</button><button id="auto" disabled>🎙️ Auto Listen: OFF</button><button id="voiceTest">🔊 Test AI Voice</button><button class="stop" id="stop" disabled>End Call</button><button id="logoutBtn">Logout</button></div><p class="pill" id="cost">AI estimated cost: रु. 0.00</p><p id="status">Ready</p><div id="log" aria-live="polite"></div><small>Microphone permission आवश्यक छ। Production मा HTTPS, authentication, per-user limits र provider billing reconciliation चाहिन्छ। Auto Listen प्रयोग गर्दा शान्त वातावरणमा बोल्नुहोस्। यो turn-based voice assistant हो, full-duplex होइन।</small></div></div><script>
-let id,stream,rec,player,accessToken=null,autoListening=false,processing=false,audioContext,analyser,sourceNode,monitorTimer,voiceSince=0,silenceSince=0,recordingStartedAt=0,recordedChunks=new Map(),interruptSince=0,playbackEpoch=0;const $=x=>document.getElementById(x),log=s=>$('log').textContent+=s+'\n',status=s=>$('status').textContent=s;
+let id,stream,rec,player,accessToken=null,autoListening=false,processing=false,audioContext,analyser,sourceNode,monitorTimer,voiceSince=0,silenceSince=0,recordingStartedAt=0,recordedChunks=new Map(),interruptSince=0,playbackEpoch=0,recordingPending=false,activeCallGeneration=0;const $=x=>document.getElementById(x),log=s=>$('log').textContent+=s+'\n',status=s=>$('status').textContent=s;
 const API_BASE='https://api-ai.roomkhoj.com';
-async function api(path,data){let r;try{r=await fetch(API_BASE+'/api/'+path,{method:'POST',headers:{'content-type':'application/json',...(accessToken?{authorization:'Bearer '+accessToken}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(60000)})}catch(e){throw Error('Backend network/CORS error ('+path+'). Check https://api-ai.roomkhoj.com/api/health and Nginx/Cloudflare. '+e.message)}let v;try{v=await r.json()}catch{throw Error('Backend returned HTTP '+r.status+' but not JSON ('+path+'). Check Nginx proxy.')}if(r.status===401&&path!=='login'){accessToken=null;id=null;autoListening=false;stopMonitor();stopRecording();stream?.getTracks().forEach(t=>t.stop());stream=null;$('callPanel').hidden=true;$('loginPanel').hidden=false;status('Login expired. Please sign in again.');throw Error('Login expired. Please sign in again.')}if(!r.ok)throw Error('HTTP '+r.status+': '+(v.error||'Request failed'));return v}
+async function api(path,data){let r;try{r=await fetch(API_BASE+'/api/'+path,{method:'POST',headers:{'content-type':'application/json',...(accessToken?{authorization:'Bearer '+accessToken}:{})},body:JSON.stringify(data),signal:AbortSignal.timeout(60000)})}catch(e){throw Error('Backend network/CORS error ('+path+'). Check https://api-ai.roomkhoj.com/api/health and Nginx/Cloudflare. '+e.message)}let v;try{v=await r.json()}catch{throw Error('Backend returned HTTP '+r.status+' but not JSON ('+path+'). Check Nginx proxy.')}if(r.status===401&&path!=='login'){activeCallGeneration++;stopAudio();accessToken=null;id=null;autoListening=false;stopMonitor();stopRecording();stream?.getTracks().forEach(t=>t.stop());stream=null;$('callPanel').hidden=true;$('loginPanel').hidden=false;status('Login expired. Please sign in again.');throw Error('Login expired. Please sign in again.')}if(!r.ok)throw Error('HTTP '+r.status+': '+(v.error||'Request failed'));return v}
 function cost(v){if(v)$('cost').textContent='AI estimated: रु. '+v.totalNpr+' | रु. '+v.nprPerMinute+'/min | target रु. '+v.targetNprPerMinute+'/min'}
-$('start').onclick=async()=>{try{if(!accessToken)throw Error('Please log in first');const health=await fetch(API_BASE+'/api/health').then(r=>{if(!r.ok)throw Error('Health HTTP '+r.status);return r.json()});if(!health.apiKeyConfigured)throw Error('Backend मा OPENAI_API_KEY उपलब्ध छैन');stream=await navigator.mediaDevices.getUserMedia({audio:true});const r=await api('session',{});id=r.id;$('start').disabled=true;$('talk').disabled=false;$('auto').disabled=false;$('stop').disabled=false;status('Connected. Enable Auto Listen or hold the blue button.')}catch(e){stream?.getTracks().forEach(t=>t.stop());stream=null;status(e.message)}};
+$('start').onclick=async()=>{try{if(!accessToken)throw Error('Please log in first');const health=await fetch(API_BASE+'/api/health').then(r=>{if(!r.ok)throw Error('Health HTTP '+r.status);return r.json()});if(!health.apiKeyConfigured)throw Error('Backend मा OPENAI_API_KEY उपलब्ध छैन');stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});const r=await api('session',{});activeCallGeneration++;id=r.id;$('start').disabled=true;$('talk').disabled=false;$('auto').disabled=false;$('stop').disabled=false;status('Connected. Enable Auto Listen or hold the blue button.')}catch(e){stream?.getTracks().forEach(t=>t.stop());stream=null;status(e.message)}};
 $('loginBtn').onclick=async()=>{try{$('loginBtn').disabled=true;const login=await api('login',{password:$('password').value});accessToken=login.token;$('password').value='';$('loginPanel').hidden=true;$('callPanel').hidden=false;status('Logged in · Ready to start call')}catch(e){status(e.message)}finally{$('loginBtn').disabled=false}};
 $('password').addEventListener('keydown',e=>{if(e.key==='Enter')$('loginBtn').click()});
 $('logoutBtn').onclick=async()=>{if(id)await $('stop').onclick();accessToken=null;$('callPanel').hidden=true;$('loginPanel').hidden=false;status('Logged out')};
 const talk=$('talk'),auto=$('auto');
 function stopMonitor(){if(monitorTimer){clearInterval(monitorTimer);monitorTimer=null}if(sourceNode){sourceNode.disconnect();sourceNode=null}if(audioContext){audioContext.close().catch(()=>{});audioContext=null}analyser=null}
 function stopRecording(){if(!rec)return;const r=rec;rec=null;if(r.state!=='inactive')r.stop()}
-function stopAudio(){playbackEpoch++;if(player){const p=player;player=null;p.pause();p.removeAttribute('src');p.load();if(p._objectUrl)URL.revokeObjectURL(p._objectUrl)}}
-async function playSpeech(audio){const epoch=playbackEpoch+1;if(!Array.isArray(audio)||audio.length===0){status('⚠️ AI ले Text पठायो तर आवाज पठाएन');log('AUDIO ERROR: Backend returned no audio bytes');return false}const bytes=Uint8Array.from(audio);const url=URL.createObjectURL(new Blob([bytes],{type:'audio/mpeg'}));stopAudio();const p=new Audio();p._objectUrl=url;player=p;playbackEpoch=epoch;p.preload='auto';p.src=url;p.onended=()=>{if(player===p){status('✅ AI आवाज सकियो');player=null}URL.revokeObjectURL(url)};p.onerror=()=>{const code=p.error?.code||'unknown';log('AUDIO ERROR: browser media error '+code);if(player===p){status('⚠️ Audio playback failed (media error '+code+')');player=null}URL.revokeObjectURL(url)};try{await p.play();if(player!==p||playbackEpoch!==epoch)return false;status('🔊 AI बोलिरहेको छ…');return true}catch(e){log('AUDIO PLAY ERROR: '+e.name+': '+e.message);status('⚠️ Speaker playback: '+e.name+' — '+e.message);if(player===p)player=null;p.pause();p.removeAttribute('src');p.load();URL.revokeObjectURL(url);return false}}
+function stopAudio(){playbackEpoch++;if(player){const p=player;player=null;p.onended=null;p.onerror=null;p.pause();p.removeAttribute('src');p.load();if(p._objectUrl)URL.revokeObjectURL(p._objectUrl)}}
+async function playSpeech(audio,callGeneration=activeCallGeneration){
+ if(!Array.isArray(audio)||!audio.length){status('⚠️ AI ले Text पठायो तर आवाज पठाएन');log('AUDIO ERROR: Empty response');return false}
+ if(callGeneration!==activeCallGeneration)return false;
+ const bytes=Uint8Array.from(audio);
+ if(bytes.length<4||!(bytes[0]===0x49&&bytes[1]===0x44&&bytes[2]===0x33)&&!(bytes[0]===0xff&&(bytes[1]&0xe0)===0xe0)){log('AUDIO WARNING: MP3 header not recognized')}
+ stopAudio();const epoch=playbackEpoch;
+ const url=URL.createObjectURL(new Blob([bytes],{type:'audio/mpeg'}));
+ const p=new Audio();p._objectUrl=url;player=p;p.preload='auto';p.src=url;
+ p.onended=()=>{if(player===p){player=null;status('✅ AI आवाज सकियो')}URL.revokeObjectURL(url)};
+ p.onerror=()=>{const code=p.error?.code||'unknown';log('AUDIO ERROR: media error '+code);if(player===p){player=null;status('⚠️ Audio playback error '+code)}URL.revokeObjectURL(url)};
+ try{await p.play();if(player!==p||playbackEpoch!==epoch||callGeneration!==activeCallGeneration)return false;status('🔊 AI बोलिरहेको छ…');return true}
+ catch(e){if(player!==p)return false;log('AUDIO PLAY ERROR: '+e.name+': '+e.message);status('⚠️ Audio permission/playback: '+e.message);stopAudio();return false}
+}
 
 function recorderType(){return ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg'].find(t=>MediaRecorder.isTypeSupported(t))||''}
-function record(){if(!id||rec||processing||!stream)return;const type=recorderType();rec=new MediaRecorder(stream,type?{mimeType:type}:{});const r=rec;recordedChunks.set(r,[]);rec.ondataavailable=e=>{if(e.data.size)recordedChunks.get(r)?.push(e.data)};rec.onstop=()=>sendTurn(r,Math.max(.25,(Date.now()-recordingStartedAt)/1000));rec.start();recordingStartedAt=Date.now();status('🎤 सुन्दैछु…')}
-async function sendTurn(recording,seconds){const recorded=recordedChunks.get(recording)||[];recordedChunks.delete(recording);if(processing||!id)return;processing=true;talk.disabled=true;try{const blob=new Blob(recorded,{type:recording.mimeType||'audio/webm'});if(blob.size<350){status('आवाज स्पष्ट आएन, फेरि बोल्नुहोस्');return}status('AI जवाफ तयार गर्दैछ…');log('🎤 Audio recorded: '+blob.size+' bytes ('+blob.type+')');const bytes=Array.from(new Uint8Array(await blob.arrayBuffer()));const result=await api('turn',{id,audio:bytes,audioType:blob.type,audioSeconds:seconds});if(!id)return;if(!result.heard){status('🎤 आवाज बुझिएन, फेरि स्पष्ट बोल्नुहोस्');log('🎤 Speech not recognized');return}log('You: '+(result.heard||'[आवाज बुझिएन]')+'\nAI: '+(result.reply||'')+'\n');cost(result.usage);await playSpeech(result.audio)}catch(e){status('⚠️ '+e.message);log('ERROR: '+e.message)}finally{processing=false;talk.disabled=!id;$('auto').disabled=!id}}
-function startMonitor(){stopMonitor();if(!stream)return;audioContext=new (window.AudioContext||window.webkitAudioContext)();audioContext.resume().catch(e=>status('Microphone activation: '+e.message));sourceNode=audioContext.createMediaStreamSource(stream);analyser=audioContext.createAnalyser();analyser.fftSize=1024;sourceNode.connect(analyser);const samples=new Uint8Array(analyser.fftSize);voiceSince=0;silenceSince=0;monitorTimer=setInterval(()=>{if(!autoListening||!id||!analyser)return;analyser.getByteTimeDomainData(samples);let sum=0;for(const x of samples){const y=(x-128)/128;sum+=y*y}const volume=Math.sqrt(sum/samples.length);const now=Date.now();const speaking=volume>0.012;if(player&&!player.paused){voiceSince=0;return}if(processing||rec?.state==='inactive')return;if(!rec){if(speaking){voiceSince=voiceSince||now;if(now-voiceSince>140){record();silenceSince=0}}else voiceSince=0}else{if(speaking)silenceSince=0;else silenceSince=silenceSince||now;if((silenceSince&&now-silenceSince>1150)||now-recordingStartedAt>14000){stopRecording();voiceSince=0;silenceSince=0}}},100)}
+function record(){
+ if(!id||rec||recordingPending||processing||!stream)return;
+ if(typeof MediaRecorder==='undefined'){status('Browser मा MediaRecorder उपलब्ध छैन');return}
+ try{
+ const type=recorderType();const r=new MediaRecorder(stream,type?{mimeType:type}:{});
+ rec=r;recordedChunks.set(r,[]);const startedAt=Date.now();const generation=activeCallGeneration;
+ r.ondataavailable=e=>{if(e.data.size)recordedChunks.get(r)?.push(e.data)};
+ r.onerror=e=>{log('RECORDER ERROR: '+(e.error?.message||'unknown'));status('Microphone recording error')};
+ r.onstop=async()=>{recordingPending=true;try{await sendTurn(r,Math.max(.25,(Date.now()-startedAt)/1000),generation)}finally{recordingPending=false}};
+ r.start();recordingStartedAt=startedAt;status('🎤 सुन्दैछु…')
+ }catch(e){rec=null;status('Recording failed: '+e.message);log('RECORDER ERROR: '+e.message)}
+}
+async function sendTurn(recording,seconds,generation){
+ const recorded=recordedChunks.get(recording)||[];recordedChunks.delete(recording);
+ if(processing||!id||generation!==activeCallGeneration)return;
+ processing=true;talk.disabled=true;const sessionId=id;
+ try{
+ const blob=new Blob(recorded,{type:recording.mimeType||'audio/webm'});
+ if(blob.size<350){status('आवाज स्पष्ट आएन, फेरि बोल्नुहोस्');return}
+ status('AI जवाफ तयार गर्दैछ…');log('🎤 Audio recorded: '+blob.size+' bytes ('+blob.type+')');
+ const bytes=Array.from(new Uint8Array(await blob.arrayBuffer()));
+ const result=await api('turn',{id:sessionId,audio:bytes,audioType:blob.type,audioSeconds:seconds});
+ if(!id||id!==sessionId||generation!==activeCallGeneration)return;
+ cost(result.usage);
+ if(!result.heard){status('🎤 आवाज बुझिएन, फेरि स्पष्ट बोल्नुहोस्');log('Speech not recognized');return}
+ log('You: '+result.heard+'\nAI: '+(result.reply||'')+'\n');
+ await playSpeech(result.audio,generation)
+ }catch(e){if(generation===activeCallGeneration){status('⚠️ '+e.message);log('ERROR: '+e.message)}}
+ finally{processing=false;talk.disabled=!id;$('auto').disabled=!id}
+}
+function startMonitor(){
+ stopMonitor();if(!stream)return;
+ audioContext=new (window.AudioContext||window.webkitAudioContext)();
+ audioContext.resume().catch(e=>log('AudioContext: '+e.message));
+ sourceNode=audioContext.createMediaStreamSource(stream);analyser=audioContext.createAnalyser();analyser.fftSize=1024;sourceNode.connect(analyser);
+ const samples=new Uint8Array(analyser.fftSize);voiceSince=0;silenceSince=0;interruptSince=0;
+ monitorTimer=setInterval(()=>{
+ if(!autoListening||!id||!analyser)return;
+ analyser.getByteTimeDomainData(samples);let sum=0;for(const x of samples){const y=(x-128)/128;sum+=y*y}
+ const volume=Math.sqrt(sum/samples.length),now=Date.now(),speaking=volume>0.012;
+ if(player&&!player.paused){
+  voiceSince=0;
+  if(!processing&&!rec&&!recordingPending&&volume>0.06){
+   interruptSince=interruptSince||now;
+   if(now-interruptSince>350){log('🎤 Caller interrupted AI');stopAudio();interruptSince=0;record()}
+  }else interruptSince=0;
+  return
+ }
+ interruptSince=0;if(processing||recordingPending)return;
+ if(!rec){if(speaking){voiceSince=voiceSince||now;if(now-voiceSince>180){record();silenceSince=0}}else voiceSince=0}
+ else{if(speaking)silenceSince=0;else silenceSince=silenceSince||now;
+ if((silenceSince&&now-silenceSince>1000)||now-recordingStartedAt>14000){stopRecording();voiceSince=0;silenceSince=0}}
+ },100)
+}
+
 $('voiceTest').onclick=async()=>{if(!accessToken){status('पहिले Login गर्नुहोस्');return}try{$('voiceTest').disabled=true;status('🔊 AI आवाज जाँच गर्दै…');const r=await api('voice-test',{});log('AI voice test: '+r.reply);await playSpeech(r.audio)}catch(e){status('⚠️ AI Voice Test: '+e.message);log('VOICE TEST ERROR: '+e.message)}finally{$('voiceTest').disabled=false}};
 auto.onclick=()=>{autoListening=!autoListening;auto.textContent=autoListening?'🎙️ Auto Listen: ON':'🎙️ Auto Listen: OFF';if(autoListening){try{startMonitor();status('बटन नथिची बोल्नुहोस्')}catch(e){autoListening=false;auto.textContent='🎙️ Auto Listen: OFF';status('Auto Listen unavailable: '+e.message)}}else{stopMonitor();stopRecording();status('Auto Listen बन्द भयो')}};
 window.addEventListener('load',async()=>{try{const r=await fetch(API_BASE+'/api/health');if(!r.ok)throw Error('Backend unavailable');const h=await r.json();status(h.apiKeyConfigured?'VPS backend reachable · Ready':'VPS backend reachable · Add OPENAI_API_KEY')}catch{status('VPS connection unavailable (check HTTPS/CORS)')}});
 talk.onpointerdown=e=>{if(!id||processing||autoListening)return;stopAudio();record();try{talk.setPointerCapture(e.pointerId)}catch{}};
 talk.onpointerup=()=>{if(!autoListening)stopRecording()};
 talk.onpointercancel=()=>{if(!autoListening)stopRecording()};
-$('stop').onclick=async()=>{const ending=id;id=null;autoListening=false;auto.textContent='🎙️ Auto Listen: OFF';stopMonitor();stopRecording();stopAudio();stream?.getTracks().forEach(t=>t.stop());stream=null;$('start').disabled=false;talk.disabled=true;auto.disabled=true;$('stop').disabled=true;try{if(ending){const r=await api('end',{id:ending});cost(r.usage)}}catch(e){log('End Call: '+e.message)}status('Call ended')};
+$('stop').onclick=async()=>{const ending=id;activeCallGeneration++;id=null;autoListening=false;auto.textContent='🎙️ Auto Listen: OFF';stopMonitor();stopRecording();stopAudio();stream?.getTracks().forEach(t=>t.stop());stream=null;$('start').disabled=false;talk.disabled=true;auto.disabled=true;$('stop').disabled=true;try{if(ending){const r=await api('end',{id:ending});cost(r.usage)}}catch(e){log('End Call: '+e.message)}status('Call ended')};
 
 </script></body></html>
