@@ -21,7 +21,7 @@ const reply=(res,status,obj)=>{res.writeHead(status,{'content-type':'application
 const body=async(req)=>{const chunks=[];let size=0;for await(const c of req){size+=c.length;if(size>5_000_000)throw Error('Audio too large');chunks.push(c)}return JSON.parse(Buffer.concat(chunks).toString())};
 function usage(s){const minutes=Math.max((Date.now()-s.started)/60000,1/60);return {totalNpr:+s.npr.toFixed(3),elapsedMinutes:+minutes.toFixed(2),nprPerMinute:+(s.npr/minutes).toFixed(2),targetNprPerMinute:target,overTarget:s.npr/minutes>target}}
 function session(id,token){const s=sessions.get(id);if(!s||s.owner!==token)throw Error('Invalid session');return s}
-async function openai(path,opts){const key=process.env.OPENAI_API_KEY;if(!key)throw Error('OPENAI_API_KEY not configured');const r=await fetch('https://api.openai.com/v1/'+path,{...opts,headers:{authorization:'Bearer '+key,...opts.headers}});if(!r.ok)throw Error('OpenAI '+r.status+': '+(await r.text()).slice(0,250));return r}
+async function openai(path,opts){const key=process.env.OPENAI_API_KEY;if(!key)throw Error('OPENAI_API_KEY not configured');const r=await fetch('https://api.openai.com/v1/'+path,{...opts,signal:AbortSignal.timeout(45000),headers:{authorization:'Bearer '+key,...opts.headers}});if(!r.ok){const raw=(await r.text()).slice(0,1500);let message='';try{message=JSON.parse(raw).error?.message||''}catch{};throw Error('OpenAI '+r.status+': '+(message||raw.slice(0,180)))}return r}
 const system='You are a polite Nepali RoomKhoj phone assistant. Speak in short, clear Nepali or the caller language. Ask one question at a time. Never invent room availability, pricing, or contact details. Keep replies under 35 words.';
 const page=await readFile(new URL('./index.html',import.meta.url));
 export async function handler(req,res){try{
@@ -50,10 +50,14 @@ if(s.turns>=15||Date.now()-s.started>15*60_000||s.npr>=maxSessionNpr)return repl
 if(busy.has(b.id))return reply(res,409,{error:'Previous voice turn is still processing'});
 busy.add(b.id);s.turns++;
 try {
-if(!Array.isArray(b.audio)||b.audio.length>3_000_000||b.audio.some(x=>!Number.isInteger(x)||x<0||x>255))return reply(res,400,{error:'Invalid audio'});
+if(!Array.isArray(b.audio)||b.audio.length===0||b.audio.length>3_000_000||b.audio.some(x=>!Number.isInteger(x)||x<0||x>255))return reply(res,400,{error:'Invalid audio'});
 const elapsedMin=Math.max((Date.now()-s.started)/60000,1);
 if(s.npr>=maxSessionNpr||s.npr>=target*elapsedMin*0.85)return reply(res,429,{error:'AI budget guard reached; pause or end call',usage:usage(s)});
-const blob=new Blob([Uint8Array.from(b.audio)],{type:'audio/webm'}),form=new FormData();form.append('file',blob,'caller.webm');form.append('model','gpt-4o-mini-transcribe');
+const allowedTypes={'audio/webm':['audio/webm','caller.webm'],'audio/mp4':['audio/mp4','caller.mp4'],'audio/ogg':['audio/ogg','caller.ogg']};
+const audioType=String(b.audioType||'audio/webm').split(';')[0].trim().toLowerCase();
+if(!allowedTypes[audioType])return reply(res,400,{error:'Unsupported audio format: '+audioType});
+const [mime,filename]=allowedTypes[audioType];
+const blob=new Blob([Uint8Array.from(b.audio)],{type:mime}),form=new FormData();form.append('file',blob,filename);form.append('model','gpt-4o-mini-transcribe');
 const transcription=await (await openai('audio/transcriptions',{method:'POST',body:form})).json();
 const text=String(transcription.text||'').trim();s.npr+=num('STT_USD_PER_MIN',0.003)*fx*(Number(b.audioSeconds)||5)/60;
 if(!text)return reply(res,200,{heard:'',reply:'',usage:usage(s)});
