@@ -28,7 +28,7 @@ const page=await readFile(new URL('./index.html',import.meta.url));
 export async function handler(req,res){try{
 const url=new URL(req.url,'http://localhost');
 const origin=req.headers.origin;
-if(origin&&origin!==originAllowed)return reply(res,403,{error:'Origin not allowed'});
+if(origin&&origin!==originAllowed){console.warn(LOG_PREFIX,'blocked origin',origin,req.url);return reply(res,403,{error:'Origin not allowed'})}
 if(origin===originAllowed){res.setHeader('access-control-allow-origin',originAllowed);res.setHeader('vary','Origin');res.setHeader('access-control-allow-headers','authorization, content-type');res.setHeader('access-control-allow-methods','GET, POST, OPTIONS')}
 if(req.method==='OPTIONS')return res.writeHead(204).end();
 if(url.pathname==='/api/login'&&req.method==='POST'){
@@ -36,10 +36,10 @@ if(url.pathname==='/api/login'&&req.method==='POST'){
  if(!limit(req))return reply(res,429,{error:'Too many login attempts'});
  const b=await body(req);
  if(!equal(b.password,password))return reply(res,401,{error:'Incorrect access password'});
- const token=randomUUID();authTokens.set(token,Date.now()+60*60_000);return reply(res,200,{token});
+ const token=randomUUID();authTokens.set(token,Date.now()+60*60_000);console.log(LOG_PREFIX,'login success');return reply(res,200,{token,expiresInSeconds:3600});
 }
 if(url.pathname.startsWith('/api/')&&!['/api/health','/api/login'].includes(url.pathname)){
- const token=authenticated(req);if(!token)return reply(res,401,{error:'Login required'});
+ const token=authenticated(req);if(!token){console.warn(LOG_PREFIX,'unauthorized',url.pathname);return reply(res,401,{error:'Login expired or required. Please login again.'})}
  req.callToken=token;
 }
 if(req.method==='GET'&&url.pathname==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(page)}
