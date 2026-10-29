@@ -1,12 +1,13 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-const port=Number(process.env.PORT||3005);
+const port=Number(process.env.PORT||3010);
 const sessions=new Map();
 const authTokens=new Map(), attempts=new Map();
 const originAllowed='https://aifrontend-topaz.vercel.app';
 const password=process.env.CALL_CENTER_ACCESS_PASSWORD||'';
 const maxSessionNpr=Number(process.env.MAX_SESSION_NPR||10);
+const LOG_PREFIX='[voice]';
 const equal=(a,b)=>{const x=Buffer.from(String(a)),y=Buffer.from(String(b));return x.length===y.length&&timingSafeEqual(x,y)};
 function authenticated(req){const token=(req.headers.authorization||'').match(/^Bearer ([a-f0-9-]{36})$/)?.[1];return token&&authTokens.get(token)>Date.now()?token:null}
 function limit(req){const ip=req.socket.remoteAddress||'unknown',now=Date.now(),a=attempts.get(ip)||{n:0,until:now+60_000};if(now>a.until){a.n=0;a.until=now+60_000}a.n++;attempts.set(ip,a);return a.n<=10}
@@ -52,30 +53,39 @@ busy.add(b.id);s.turns++;
 try {
 if(!Array.isArray(b.audio)||b.audio.length===0||b.audio.length>3_000_000||b.audio.some(x=>!Number.isInteger(x)||x<0||x>255))return reply(res,400,{error:'Invalid audio'});
 const elapsedMin=Math.max((Date.now()-s.started)/60000,1);
-if(s.npr>=maxSessionNpr||s.npr>=target*elapsedMin*0.85)return reply(res,429,{error:'AI budget guard reached; pause or end call',usage:usage(s)});
+if(s.npr>=maxSessionNpr)return reply(res,429,{error:'Session spending limit reached',usage:usage(s)});
 const allowedTypes={'audio/webm':['audio/webm','caller.webm'],'audio/mp4':['audio/mp4','caller.mp4'],'audio/ogg':['audio/ogg','caller.ogg']};
 const audioType=String(b.audioType||'audio/webm').split(';')[0].trim().toLowerCase();
 if(!allowedTypes[audioType])return reply(res,400,{error:'Unsupported audio format: '+audioType});
 const [mime,filename]=allowedTypes[audioType];
 const blob=new Blob([Uint8Array.from(b.audio)],{type:mime}),form=new FormData();form.append('file',blob,filename);form.append('model','gpt-4o-mini-transcribe');
+console.log(LOG_PREFIX,'transcribing',b.id,'bytes',b.audio.length,'type',mime);
 const transcription=await (await openai('audio/transcriptions',{method:'POST',body:form})).json();
-const text=String(transcription.text||'').trim();s.npr+=num('STT_USD_PER_MIN',0.003)*fx*(Number(b.audioSeconds)||5)/60;
+const text=String(transcription.text||'').trim();console.log(LOG_PREFIX,'transcription',b.id,'characters',text.length);s.npr+=num('STT_USD_PER_MIN',0.003)*fx*(Number(b.audioSeconds)||5)/60;
 if(!text)return reply(res,200,{heard:'',reply:'',usage:usage(s)});
 s.messages.push({role:'user',content:text});
 const result=await (await openai('chat/completions',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'gpt-4o-mini',messages:s.messages.slice(-12),max_tokens:110})})).json();
-const answer=String(result.choices?.[0]?.message?.content||'माफ गर्नुहोस्, फेरि भन्नुहोस्।').slice(0,450);
+const answer=String(result.choices?.[0]?.message?.content||'माफ गर्नुहोस्, फेरि भन्नुहोस्।').slice(0,450);console.log(LOG_PREFIX,'LLM reply',b.id,'characters',answer.length);
 s.npr+=fx*((result.usage?.prompt_tokens||0)*prices.input+(result.usage?.completion_tokens||0)*prices.output)/1e6;
 s.messages.push({role:'assistant',content:answer});
 const estimatedTts=answer.length*prices.tts*fx/1e6;
-if(s.npr+estimatedTts>maxSessionNpr||s.npr+estimatedTts>target*elapsedMin*0.95)return reply(res,429,{error:'TTS would exceed the configured AI budget',heard:text,reply:answer,usage:usage(s)});
+if(s.npr+estimatedTts>maxSessionNpr)return reply(res,429,{error:'Session spending limit reached before speech generation',heard:text,reply:answer,usage:usage(s)});
 const speech=await openai('audio/speech',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'gpt-4o-mini-tts',voice:'alloy',input:answer,response_format:'mp3'})});
 const audio=Array.from(new Uint8Array(await speech.arrayBuffer()));
-s.npr+=estimatedTts;
+s.npr+=estimatedTts;console.log(LOG_PREFIX,'speech ready',b.id,'bytes',audio.length);
 return reply(res,200,{heard:text,reply:answer,audio,usage:usage(s),note:'Cost is estimated from configured rates; verify against provider invoice.'});
 } finally {busy.delete(b.id)}
 }
+if(req.method==='POST'&&url.pathname==='/api/voice-test'){
+const message='नमस्ते! म रुमखोज एआई सहायक हुँ। अब तपाईं मसँग नेपालीमा कुरा गर्न सक्नुहुन्छ।';
+console.log(LOG_PREFIX,'voice test requested');
+const speech=await openai('audio/speech',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:'gpt-4o-mini-tts',voice:'alloy',input:message,response_format:'mp3'})});
+const audio=Array.from(new Uint8Array(await speech.arrayBuffer()));
+console.log(LOG_PREFIX,'voice test success',audio.length);
+return reply(res,200,{reply:message,audio});
+}
 if(req.method==='POST'&&url.pathname==='/api/end'){const b=await body(req),s=session(b.id,req.callToken);sessions.delete(b.id);return reply(res,200,{usage:usage(s)})}
 reply(res,404,{error:'Not found'});
-}catch(e){reply(res,400,{error:String(e.message||e)})}
+}catch(e){console.error(LOG_PREFIX,'request failed',req.method,req.url,String(e.message||e));reply(res,400,{error:String(e.message||e)})}
 }
 if(!process.env.VERCEL)http.createServer(handler).listen(port,process.env.HOST||'127.0.0.1',()=>console.log('AI Call Center listening on http://localhost:'+port));
