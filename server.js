@@ -3,6 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 const port=Number(process.env.PORT||3005);
 const sessions=new Map();
+// Serialize turns per session to avoid overlapping billable API calls.
+const busy=new Set();
+setInterval(()=>{for(const [id,s] of sessions){if(Date.now()-s.started>30*60_000&&!busy.has(id))sessions.delete(id)}},60_000).unref();
 const num=(k,d)=>{const n=Number(process.env[k]??d);return Number.isFinite(n)&&n>=0?n:d};
 const target=num('AI_TARGET_NPR_PER_MIN',3),fx=num('USD_TO_NPR',145);
 const prices={stt:num('STT_USD_PER_MIN',0.003),input:num('LLM_INPUT_USD_PER_1M',0.15),output:num('LLM_OUTPUT_USD_PER_1M',0.60),tts:num('TTS_USD_PER_1M_CHARS',15)};
@@ -16,9 +19,13 @@ const page=await readFile(new URL('./index.html',import.meta.url));
 http.createServer(async(req,res)=>{try{
 const url=new URL(req.url,'http://localhost');
 if(req.method==='GET'&&url.pathname==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(page)}
+if(req.method==='GET'&&url.pathname==='/api/health')return reply(res,200,{ok:true,apiKeyConfigured:Boolean(process.env.OPENAI_API_KEY),targetNprPerMinute:target});
 if(req.method==='POST'&&url.pathname==='/api/session'){const id=randomUUID();sessions.set(id,{started:Date.now(),npr:0,messages:[{role:'system',content:system}]});return reply(res,200,{id,targetNprPerMinute:target})}
 if(req.method==='POST'&&url.pathname==='/api/turn'){
 const b=await body(req),s=session(b.id);
+if(busy.has(b.id))return reply(res,409,{error:'Previous voice turn is still processing'});
+busy.add(b.id);
+try {
 if(!Array.isArray(b.audio)||b.audio.length>3_000_000||b.audio.some(x=>!Number.isInteger(x)||x<0||x>255))return reply(res,400,{error:'Invalid audio'});
 const elapsedMin=Math.max((Date.now()-s.started)/60000,1);
 if(s.npr>=target*elapsedMin*0.85)return reply(res,429,{error:'AI budget guard reached; pause or end call',usage:usage(s)});
@@ -37,6 +44,7 @@ const speech=await openai('audio/speech',{method:'POST',headers:{'content-type':
 const audio=Array.from(new Uint8Array(await speech.arrayBuffer()));
 s.npr+=estimatedTts;
 return reply(res,200,{heard:text,reply:answer,audio,usage:usage(s),note:'Cost is estimated from configured rates; verify against provider invoice.'});
+} finally {busy.delete(b.id)}
 }
 if(req.method==='POST'&&url.pathname==='/api/end'){const b=await body(req),s=session(b.id);sessions.delete(b.id);return reply(res,200,{usage:usage(s)})}
 reply(res,404,{error:'Not found'});
