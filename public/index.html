@@ -1,10 +1,10 @@
 <!doctype html>
 <html lang="ne"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RoomKhoj Live Voice</title>
 <style>body{background:#0b1220;color:#f4f7ff;font:17px system-ui;margin:0}.card{max-width:640px;margin:7vh auto;padding:28px;background:#172236;border-radius:20px}button,input{font:inherit;padding:12px;margin:6px;border-radius:10px;border:0}button{cursor:pointer}button:disabled{opacity:.45}#start{background:#44dd9b}#end{background:#ff9b9b}#log{white-space:pre-wrap;line-height:1.7}small{color:#bbc9df}audio{width:100%}</style>
-<div class="card"><h1>🎙️ RoomKhoj Live Voice</h1><p>Start थिच्नुहोस् र सीधै बोल्नुहोस्। बीचमा बोल्दा AI रोकिन्छ।</p>
+<div class="card"><h1>🎙️ RoomKhoj Live Voice</h1><p>सस्तो mode मा बोलेको भाग मात्र पठाइन्छ। यो AI परीक्षण हो; कोठाको data save वा customer call गर्दैन।</p>
 <div id="login"><input id="password" type="password" aria-label="Access password" placeholder="Access password"><button id="signIn">Login</button></div>
-<div id="panel" hidden><button id="start">Start Live Call</button><button id="mute" disabled>Mute mic</button><button id="end" disabled>End Call</button><button id="logout">Logout</button></div>
-<p id="status" role="status">Ready</p><audio id="speaker" autoplay controls></audio>
+<div id="panel" hidden><label>Calling mode <select id="mode"><option value="hybrid">सस्तो — पालैपालो बोल्ने</option><option value="realtime">Live WebRTC — बढी खर्च हुन सक्छ</option></select></label><br><button id="start">Start Live Call</button><button id="mute" disabled>Mute mic</button><button id="end" disabled>End Call</button><button id="logout">Logout</button></div>
+<div id="hybridControls" hidden><button id="record" disabled>बोल्न सुरु</button><button id="send" disabled>पठाउनुहोस्</button><button id="stopVoice">जवाफ रोक्नुहोस्</button></div><p id="cost" role="status">खर्च मापन उपलब्ध छैन</p><p id="status" role="status">Ready</p><audio id="speaker" autoplay controls></audio>
 <p><small>Realtime API billing लागू हुन्छ; रु. ३/min को सीमा लागू हुँदैन। परीक्षण call अधिकतम ५ मिनेट। आवाज OpenAI मा live पठाइन्छ।</small></p><div id="log" aria-live="polite"></div></div>
 <script>
 const $=id=>document.getElementById(id),API='https://api-ai.roomkhoj.com';
@@ -17,15 +17,15 @@ async function api(path,data){
  if(!r.ok)throw Error(v.error||'HTTP '+r.status);return v;
 }
 function cleanup(c){
- if(!c)return;clearTimeout(c.timer);clearTimeout(c.connectTimer);c.abort=true;
+ if(!c)return;if(c.hybrid){stopHybridRecording(c);c.playback?.stop();c.playback=null;void c.context?.close().catch(()=>{});if(call===c)$('hybridControls').hidden=true;}clearTimeout(c.timer);clearTimeout(c.connectTimer);c.abort=true;
  if(c.dc){c.dc.onclose=null;c.dc.close()}if(c.pc){c.pc.onconnectionstatechange=null;c.pc.close()}
  c.stream?.getTracks().forEach(t=>t.stop());
  if(call===c){call=null;$('speaker').pause();$('speaker').srcObject=null}
 }
 async function endCall(message='Call ended'){
  generation++;const c=call;cleanup(c);
- $('start').disabled=false;$('end').disabled=true;$('mute').disabled=true;$('mute').textContent='Mute mic';status(message);
- if(c?.id){try{await api('end',{id:c.id})}catch(e){log('End: '+e.message+'; server timeout remains active')}}
+ $('mode').disabled=false;$('start').disabled=false;$('end').disabled=true;$('mute').disabled=true;$('mute').textContent='Mute mic';status(message);
+ if(c?.id){try{const r=await api(c.hybrid?'hybrid/end':'end',{id:c.id});if(c.hybrid)showUsage(r.usage)}catch(e){log('End: '+e.message+'; server timeout remains active')}}
 }
 $('signIn').onclick=async()=>{
  $('signIn').disabled=true;try{const r=await api('login',{password:$('password').value});token=r.token;$('password').value='';$('login').hidden=true;$('panel').hidden=false;status('Ready for live call')}catch(e){status(e.message)}finally{$('signIn').disabled=false}
@@ -33,6 +33,8 @@ $('signIn').onclick=async()=>{
 $('password').onkeydown=e=>{if(e.key==='Enter')$('signIn').click()};
 $('start').onclick=async()=>{
  if(call||!token)return;
+ if($('mode').value==='hybrid'){await startHybrid();return}
+ $('mode').disabled=true;$('cost').textContent='Live WebRTC: खर्च मापन र सस्तो mode को सीमा लागू छैन।';
  const c={};call=c;const gen=++generation;$('start').disabled=true;$('end').disabled=false;status('Microphone जोड्दैछु…');
  try{
   if(!navigator.mediaDevices?.getUserMedia||!window.RTCPeerConnection)throw Error('HTTPS र WebRTC support भएको browser चाहिन्छ');
@@ -73,5 +75,68 @@ $('start').onclick=async()=>{
 $('end').onclick=()=>void endCall();
 $('mute').onclick=()=>{const t=call?.stream?.getAudioTracks()[0];if(t){t.enabled=!t.enabled;$('mute').textContent=t.enabled?'Mute mic':'Unmute mic'}};
 $('logout').onclick=async()=>{await endCall();token=null;$('panel').hidden=true;$('login').hidden=false;status('Logged out')};
-window.addEventListener('pagehide',()=>{const c=call;if(c?.id&&token)fetch(API+'/api/end',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({id:c.id}),keepalive:true}).catch(()=>{});cleanup(c)});
+window.addEventListener('pagehide',()=>{const c=call;if(c?.id&&token)fetch(API+(c.hybrid?'/api/hybrid/end':'/api/end'),{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({id:c.id}),keepalive:true}).catch(()=>{});cleanup(c)});
+// Loaded inline by both frontend copies. Explicit recording avoids billing silence.
+function showUsage(u){
+ const box=$('cost');if(!u)return;
+ const total=u.estimatedTotalNpr,rate=u.estimatedNprPerMinute;
+ box.textContent=total===null?'खर्च अनिश्चित छ। फेरि call नगरी provider billing जाँच्नुहोस्।':`अनुमान: रु. ${total.toFixed(3)} | औसत रु. ${rate.toFixed(2)}/min | लक्ष्य रु. ${u.targetNprPerMinute}/min`;
+ box.style.color=u.overTarget||total===null?'#ff9090':'#c6ffdf';
+}
+function stopHybridRecording(c){
+ clearTimeout(c.recordTimer);c.recording=false;
+ if(c.processor){c.processor.onaudioprocess=null;c.processor.disconnect();c.processor=null}
+ c.source?.disconnect();c.gain?.disconnect();c.stream?.getTracks().forEach(t=>t.stop());c.stream=null;
+ if(call===c){$('record').disabled=true;$('send').disabled=true;}
+}
+function pcmToWav(chunks,rate){
+ const length=chunks.reduce((n,c)=>n+c.length,0),bytes=new Uint8Array(44+length*2),v=new DataView(bytes.buffer);
+ const str=(at,s)=>{for(let i=0;i<s.length;i++)bytes[at+i]=s.charCodeAt(i)};
+ str(0,'RIFF');v.setUint32(4,bytes.length-8,true);str(8,'WAVEfmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,rate,true);v.setUint32(28,rate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);str(36,'data');v.setUint32(40,length*2,true);
+ let at=44;for(const chunk of chunks)for(const sample of chunk){v.setInt16(at,Math.round(Math.max(-1,Math.min(1,sample))*32767),true);at+=2;}
+ let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));return btoa(binary);
+}
+async function startHybrid(){
+ const c={hybrid:true,chunks:[]};call=c;const gen=++generation;$('start').disabled=true;$('end').disabled=false;$('mode').disabled=true;status('सस्तो mode जोड्दैछु…');
+ try{
+  // Check backend capability before requesting microphone access or starting paid work.
+  const r=await api('hybrid/session',{});c.id=r.id;
+  if(c.abort||gen!==generation){await api('hybrid/end',{id:r.id});return}
+  c.context=new AudioContext();await c.context.resume();
+  c.timer=setTimeout(()=>void endCall('५ मिनेटको परीक्षण सकियो'),r.maxDurationSeconds*1000);
+  $('hybridControls').hidden=false;$('record').disabled=false;showUsage(r.usage);status('बोल्न सुरु थिचेर बढीमा १० सेकेन्ड बोल्नुहोस्।');
+ }catch(e){if(gen===generation)await endCall('⚠️ '+e.message);else cleanup(c)}
+}
+$('record').onclick=async()=>{
+ const c=call;if(!c?.hybrid||c.busy||c.recording||c.acquiring)return;
+ c.acquiring=true;$('record').disabled=true;
+ try{
+  c.playback?.stop();c.playback=null;c.chunks=[];
+  const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  if(call!==c||c.abort){stream.getTracks().forEach(t=>t.stop());return}
+  c.stream=stream;await c.context.resume();if(call!==c||c.abort){stream.getTracks().forEach(t=>t.stop());return}
+  c.source=c.context.createMediaStreamSource(stream);c.processor=c.context.createScriptProcessor(4096,1,1);c.gain=c.context.createGain();c.gain.gain.value=0;
+  const max=Math.floor(c.context.sampleRate*10);let samples=0;
+  c.processor.onaudioprocess=e=>{if(!c.recording)return;const data=e.inputBuffer.getChannelData(0),take=Math.min(data.length,max-samples);if(take>0){c.chunks.push(data.slice(0,take));samples+=take}if(samples>=max)void sendHybrid(c)};
+  c.recording=true;c.source.connect(c.processor);c.processor.connect(c.gain);c.gain.connect(c.context.destination);
+  $('send').disabled=false;status('🎤 सुन्दैछु… सकिएपछि पठाउनुहोस् थिच्नुहोस्।');c.recordTimer=setTimeout(()=>void sendHybrid(c),10000);
+ }catch(e){stopHybridRecording(c);if(call===c){$('record').disabled=false;status('Microphone: '+e.message)}}finally{c.acquiring=false}
+};
+async function sendHybrid(c){
+ if(call!==c||!c.recording||c.busy)return;c.busy=true;stopHybridRecording(c);status('जवाफ तयार हुँदैछ…');
+ try{
+  const wav=pcmToWav(c.chunks,c.context.sampleRate);c.chunks=[];
+  const r=await api('hybrid/turn',{id:c.id,turnId:crypto.randomUUID(),wav});
+  if(call!==c||c.abort)return;showUsage(r.usage);if(r.heard)log('You: '+r.heard);if(r.reply)log('AI: '+r.reply);
+  if(r.pcm){
+   const raw=atob(r.pcm),buffer=new ArrayBuffer(raw.length),bytes=new Uint8Array(buffer);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+   const view=new DataView(buffer),audio=c.context.createBuffer(1,bytes.length/2,r.sampleRate),data=audio.getChannelData(0);for(let i=0;i<data.length;i++)data[i]=view.getInt16(i*2,true)/32768;
+   const source=c.context.createBufferSource();source.buffer=audio;source.connect(c.context.destination);c.playback=source;source.onended=()=>{if(call===c&&c.playback===source){c.playback=null;status('🎤 फेरि बोल्न सुरु थिच्नुहोस्।')}};source.start();status('🔊 AI बोल्दैछ। बीचमा रोक्न वा फेरि बोल्न सक्नुहुन्छ।');
+  }else status('आवाज सुनिएन। फेरि बोल्नुहोस्।');
+ }catch(e){if(call===c){try{const r=await api('hybrid/usage',{id:c.id});showUsage(r.usage)}catch{};await endCall('⚠️ '+e.message)}}finally{c.busy=false;if(call===c)$('record').disabled=false}
+}
+$('send').onclick=()=>void sendHybrid(call);
+$('stopVoice').onclick=()=>{const c=call;if(c?.playback){c.playback.stop();c.playback=null;status('आवाज रोकियो। फेरि बोल्न सक्नुहुन्छ।')}};
+
 </script></html>
+

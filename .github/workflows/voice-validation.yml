@@ -1,0 +1,16 @@
+name: Voice validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  mock-voice:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --check server.js && node --check hybrid.js
+      - run: npm test
+      - run: cmp index.html public/index.html
