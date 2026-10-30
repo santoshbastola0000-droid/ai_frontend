@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createHybrid } from './hybrid.js';
 import { readFile } from 'node:fs/promises';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 const port=Number(process.env.PORT||3010);
@@ -25,6 +26,8 @@ const body=async(req)=>{const chunks=[];let size=0;for await(const c of req){siz
 function usage(s){const minutes=Math.max((Date.now()-s.started)/60000,1/60);return {totalNpr:+s.npr.toFixed(3),elapsedMinutes:+minutes.toFixed(2),nprPerMinute:+(s.npr/minutes).toFixed(2),targetNprPerMinute:target,overTarget:s.npr/minutes>target}}
 function session(id,token){const s=sessions.get(id);if(!s||s.owner!==token)throw Error('Invalid session');return s}
 async function openai(path,opts){const key=process.env.OPENAI_API_KEY;if(!key)throw Error('OPENAI_API_KEY not configured');const r=await fetch('https://api.openai.com/v1/'+path,{...opts,signal:AbortSignal.timeout(45000),headers:{authorization:'Bearer '+key,...opts.headers}});if(!r.ok){const raw=(await r.text()).slice(0,1500);let message='';try{message=JSON.parse(raw).error?.message||''}catch{};throw Error('OpenAI '+r.status+': '+(message||raw.slice(0,180)))}return r}
+const hybrid=createHybrid({openai,fx:Number(process.env.USD_TO_NPR??153),cap:Number(process.env.HYBRID_MAX_ESTIMATED_NPR??3),target:Number(process.env.AI_TARGET_NPR_PER_MIN??3)});
+setInterval(()=>hybrid.prune(),60000).unref();
 const system='You are a polite Nepali RoomKhoj phone assistant. Speak in short, clear Nepali or the caller language. Ask one question at a time. Never invent room availability, pricing, or contact details. Keep replies under 35 words.';
 const page=await readFile(new URL('./index.html',import.meta.url));
 export async function handler(req,res){try{
@@ -46,6 +49,13 @@ if(url.pathname.startsWith('/api/')&&!['/api/health','/api/login'].includes(url.
 }
 if(req.method==='GET'&&url.pathname==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(page)}
 if(req.method==='GET'&&url.pathname==='/api/health')return reply(res,200,{ok:true,apiKeyConfigured:Boolean(process.env.OPENAI_API_KEY),targetNprPerMinute:target});
+if(req.method==='POST'&&url.pathname==='/api/hybrid/session'){
+ if(!limit(req))return reply(res,429,{error:'Too many call starts'});
+ return reply(res,200,hybrid.start(req.callToken));
+}
+if(req.method==='POST'&&url.pathname==='/api/hybrid/turn')return reply(res,200,await hybrid.turn(await body(req),req.callToken));
+if(req.method==='POST'&&url.pathname==='/api/hybrid/usage'){const b=await body(req);return reply(res,200,{usage:hybrid.report(b.id,req.callToken)})}
+if(req.method==='POST'&&url.pathname==='/api/hybrid/end'){const b=await body(req);return reply(res,200,hybrid.end(b.id,req.callToken))}
 if(req.method==='POST'&&url.pathname==='/api/session'){
  const b=await body(req),id=randomUUID();
  if([...sessions.values()].filter(s=>s.owner===req.callToken).length>=2)return reply(res,429,{error:'Maximum two active calls'});
@@ -115,3 +125,4 @@ reply(res,404,{error:'Not found'});
 }catch(e){console.error(LOG_PREFIX,'request failed',req.method,req.url,String(e.message||e));reply(res,400,{error:String(e.message||e)})}
 }
 if(!process.env.VERCEL)http.createServer(handler).listen(port,process.env.HOST||'127.0.0.1',()=>console.log('AI Call Center listening on http://localhost:'+port));
+
