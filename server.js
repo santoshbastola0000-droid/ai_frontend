@@ -46,7 +46,28 @@ if(url.pathname.startsWith('/api/')&&!['/api/health','/api/login'].includes(url.
 }
 if(req.method==='GET'&&url.pathname==='/'){res.writeHead(200,{'content-type':'text/html; charset=utf-8'});return res.end(page)}
 if(req.method==='GET'&&url.pathname==='/api/health')return reply(res,200,{ok:true,apiKeyConfigured:Boolean(process.env.OPENAI_API_KEY),targetNprPerMinute:target});
-if(req.method==='POST'&&url.pathname==='/api/session'){const id=randomUUID();if([...sessions.values()].filter(s=>s.owner===req.callToken).length>=2)return reply(res,429,{error:'Maximum two active calls'});sessions.set(id,{owner:req.callToken,turns:0,started:Date.now(),npr:0,messages:[{role:'system',content:system}]});return reply(res,200,{id,targetNprPerMinute:target})}
+if(req.method==='POST'&&url.pathname==='/api/session'){
+ const b=await body(req),id=randomUUID();
+ if([...sessions.values()].filter(s=>s.owner===req.callToken).length>=2)return reply(res,429,{error:'Maximum two active calls'});
+ if(b.mode==='realtime'){
+  if(!limit(req))return reply(res,429,{error:'Too many call starts; wait one minute'});
+  if(typeof b.sdp!=='string'||b.sdp.length>100000||!b.sdp.startsWith('v=0'))return reply(res,400,{error:'Invalid WebRTC offer'});
+  const s={owner:req.callToken,started:Date.now(),npr:0,realtime:true};sessions.set(id,s);
+  try{
+   const fd=new FormData();fd.set('sdp',b.sdp);
+   fd.set('session',JSON.stringify({type:'realtime',model:process.env.REALTIME_MODEL||'gpt-realtime-2.1',instructions:system+' Start with a brief Nepali greeting. Listen continuously and let the caller interrupt. Do not respond to background noise.',max_output_tokens:160,audio:{input:{noise_reduction:{type:'near_field'},transcription:{model:'gpt-4o-mini-transcribe'},turn_detection:{type:'server_vad',threshold:0.5,prefix_padding_ms:300,silence_duration_ms:600,create_response:true,interrupt_response:true}},output:{voice:'marin'}}}));
+   const r=await openai('realtime/calls',{method:'POST',body:fd});
+   const location=r.headers.get('location')||'';
+   s.callId=location.split('/').pop();
+   if(!/^[a-zA-Z0-9_-]+$/.test(s.callId||''))throw Error('Realtime call ID missing; cannot enforce call timeout');
+   s.timer=setTimeout(()=>{openai('realtime/calls/'+s.callId+'/hangup',{method:'POST'}).catch(e=>console.error(LOG_PREFIX,'hangup failed',e.message));sessions.delete(id)},300000);s.timer.unref();
+   const answer=await r.text();
+   return reply(res,200,{id,sdp:answer,maxDurationSeconds:300,mode:'realtime'});
+  }catch(e){sessions.delete(id);throw e}
+ }
+ sessions.set(id,{owner:req.callToken,turns:0,started:Date.now(),npr:0,messages:[{role:'system',content:system}]});
+ return reply(res,200,{id,targetNprPerMinute:target});
+}
 if(req.method==='POST'&&url.pathname==='/api/turn'){
 const b=await body(req),s=session(b.id,req.callToken);
 if(s.turns>=15||Date.now()-s.started>15*60_000||s.npr>=maxSessionNpr)return reply(res,429,{error:'Session limit reached'});
@@ -85,7 +106,11 @@ const audio=Array.from(new Uint8Array(await speech.arrayBuffer()));
 console.log(LOG_PREFIX,'voice test success',audio.length);
 return reply(res,200,{reply:message,audio});
 }
-if(req.method==='POST'&&url.pathname==='/api/end'){const b=await body(req),s=session(b.id,req.callToken);sessions.delete(b.id);return reply(res,200,{usage:usage(s)})}
+if(req.method==='POST'&&url.pathname==='/api/end'){
+ const b=await body(req),s=session(b.id,req.callToken);
+ if(s.realtime){if(s.callId)await openai('realtime/calls/'+s.callId+'/hangup',{method:'POST'});clearTimeout(s.timer);sessions.delete(b.id);return reply(res,200,{ended:true})}
+ sessions.delete(b.id);return reply(res,200,{usage:usage(s)});
+}
 reply(res,404,{error:'Not found'});
 }catch(e){console.error(LOG_PREFIX,'request failed',req.method,req.url,String(e.message||e));reply(res,400,{error:String(e.message||e)})}
 }
