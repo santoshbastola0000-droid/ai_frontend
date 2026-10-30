@@ -1,0 +1,3 @@
+ROOMKHOJ_DEPLOY_CHECK_20261030_01
+Purpose: verify GitHub-to-VPS file synchronization.
+This marker does not change AI call behavior.
